@@ -1,0 +1,28 @@
+# Pinned for Python 3.8 compatibility (matches your anaconda base).
+# Newer pythons can use looser constraints.
+
+numpy>=1.24,<2.0
+scipy>=1.10,<1.14
+opencv-python>=4.8,<5.0
+Pillow>=10.0,<11.0
+
+# Pose, OCR
+pytesseract>=0.3.10
+
+# DepthAnything + ResNet (3D feature extractor)
+# torch 2.2 / torchvision 0.17 is the last pair with py3.8 wheels.
+torch>=2.2,<2.4
+torchvision>=0.17,<0.19
+# transformers 4.45 is the last 4.x with py3.8 support.
+transformers>=4.40,<4.46
+huggingface-hub>=0.20
+
+# pygame for the interactive 3D flow viewer
+pygame>=2.5
+
+# Marching cubes / mesh helpers for the voxel reconstructor
+scikit-image>=0.21,<0.23
+
+# Optional, py3.9+ only -- install separately if you want view-ply.py to work:
+#   pip install "open3d>=0.18"
+# CloudCompare / MeshLab on the Windows side are the recommended PLY viewers.

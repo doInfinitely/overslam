@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+captures/
+screenshots/
+maps/
+negatives/
+classify_out/
+mei_walls/
+saliency_poses/
+*.png
+*.gif
+*.npy
+*.ply
+*.pt
+*.pth
+calibration.json
