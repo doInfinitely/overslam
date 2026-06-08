@@ -191,7 +191,8 @@ def pyramid_affine_flow(pre: np.ndarray, post: np.ndarray,
                         sigma_end: float = 0.8,
                         device: str = 'cpu',
                         frame_cb=None,
-                        frame_every: int = 5) -> np.ndarray:
+                        frame_every: int = 5,
+                        verbose: bool = True) -> np.ndarray:
     """
     Pyramid affine optical flow.
 
@@ -230,9 +231,10 @@ def pyramid_affine_flow(pre: np.ndarray, post: np.ndarray,
         # sigma_end scales with factor so fine levels still end up sharp.
         level_sigma_end = max(sigma_end, sigma_end * factor * 0.5)
 
-        print(f"  level {level}  ({Hl}×{Wl})  "
-              f"grid {n_y}×{n_x}  swatch {swatch}px  "
-              f"σ {sigma_start:.1f}→{level_sigma_end:.1f}", flush=True)
+        if verbose:
+            print(f"  level {level}  ({Hl}×{Wl})  "
+                  f"grid {n_y}×{n_x}  swatch {swatch}px  "
+                  f"σ {sigma_start:.1f}→{level_sigma_end:.1f}", flush=True)
         params = _fit_level(pre_raw, post_raw, swatch, lam, n_iters, lr,
                             sigma_start=sigma_start,
                             sigma_end=level_sigma_end,

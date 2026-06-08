@@ -502,35 +502,32 @@ class DepthThread(threading.Thread):
 def flow_depth_map(frame_a: np.ndarray, frame_b: np.ndarray,
                    baseline_m: float, focal_px: float,
                    out_h: int, out_w: int,
-                   thumb_w: int = 320, thumb_h: int = 180,
-                   min_disp: float = 0.5):
+                   thumb_w: int = 160, thumb_h: int = 90,
+                   min_disp: float = 0.5,
+                   device: "str | None" = None):
     """Triangulate metric depth from two forward-motion frames.
 
-    frame_a / frame_b : BGR, any resolution (will be downscaled to thumb).
-    baseline_m        : camera translation between the two frames (metres).
-    focal_px          : full-resolution focal length (pixels).
-    out_h, out_w      : output depth map shape (should match game frame).
-    min_disp          : minimum radial flow (px, thumb-space) below which
-                        depth is unreliable (set to NaN).
-
+    Uses pyramid affine flow for dense coverage through textureless regions.
     Returns (depth_map HxW float32 metres, mean_radial_px float, focal_t float).
-    mean_radial_px is the mean outward radial flow in thumbnail pixels.
-    Forward displacement (geometric, no calibration): disp_m = mean_radial_px * Z / THUMB_MEAN_R
-    flow_vel_cal corrects for da_scale error: disp_m /= flow_vel_cal"""
+    """
     import cv2
+    import torch
+    from flow_affine import pyramid_affine_flow as _paflow
+
+    if device is None:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
     scale_x = thumb_w / frame_a.shape[1]
-    focal_t = focal_px * scale_x   # focal in thumbnail pixels
+    focal_t = focal_px * scale_x
 
-    ga = cv2.cvtColor(cv2.resize(frame_a, (thumb_w, thumb_h),
-                                  interpolation=cv2.INTER_AREA),
-                      cv2.COLOR_BGR2GRAY)
-    gb = cv2.cvtColor(cv2.resize(frame_b, (thumb_w, thumb_h),
-                                  interpolation=cv2.INTER_AREA),
-                      cv2.COLOR_BGR2GRAY)
+    def _gray(f):
+        return cv2.cvtColor(cv2.resize(f, (thumb_w, thumb_h),
+                                       interpolation=cv2.INTER_AREA),
+                            cv2.COLOR_BGR2GRAY)
 
-    flow = cv2.calcOpticalFlowFarneback(
-        ga, gb, None, pyr_scale=0.5, levels=3, winsize=15,
-        iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
+    flow = _paflow(_gray(frame_a), _gray(frame_b),
+                   levels=3, swatch=8, lam=0.05, n_iters=150, lr=0.05,
+                   sigma_start=6.0, sigma_end=0.5, device=device, verbose=False)
 
     cx = thumb_w / 2.0
     cy = thumb_h / 2.0
@@ -538,7 +535,6 @@ def flow_depth_map(frame_a: np.ndarray, frame_b: np.ndarray,
     yg = (np.arange(thumb_h, dtype=np.float32) - cy)[:, None]
     rg = np.sqrt(xg ** 2 + yg ** 2) + 1e-3
 
-    # Radial (outward) component of flow = forward-motion disparity.
     radial = flow[..., 0] * xg / rg + flow[..., 1] * yg / rg
     mean_radial_px = float(np.clip(radial, 0, None).mean())
 
@@ -554,15 +550,23 @@ def flow_depth_map(frame_a: np.ndarray, frame_b: np.ndarray,
 
 def wiggle_depth_map(frames: list, strafe_speed: float, frame_dt: float,
                      focal_px: float, out_h: int, out_w: int,
-                     thumb_w: int = 320, thumb_h: int = 180) -> np.ndarray:
-    """Dense depth map from a left-right strafe wiggle.
+                     thumb_w: int = 160, thumb_h: int = 90,
+                     device: "str | None" = None) -> np.ndarray:
+    """Dense depth map from a left-right strafe wiggle using pyramid affine flow.
 
-    Each consecutive pair has a small lateral displacement so the FOE
-    oscillates — every pixel gets flow.  Per-pair depth:
+    Each consecutive pair has a small lateral displacement so every pixel,
+    including textureless walls and floors, gets flow via the smoothness
+    regulariser.  Per-pair depth:
         D = focal_t × (strafe_speed × frame_dt) / |flow_magnitude|
     Median across all pairs gives a robust dense estimate.
     """
     import cv2
+    import torch
+    from flow_affine import pyramid_affine_flow as _paflow
+
+    if device is None:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
     scale_x = thumb_w / frames[0].shape[1]
     focal_t = focal_px * scale_x
     lateral_baseline = strafe_speed * frame_dt
@@ -574,11 +578,10 @@ def wiggle_depth_map(frames: list, strafe_speed: float, frame_dt: float,
 
     pair_depths = []
     for i in range(len(grays) - 1):
-        fl = cv2.calcOpticalFlowFarneback(
-            grays[i], grays[i + 1], None,
-            pyr_scale=0.5, levels=3, winsize=15,
-            iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
-        mag = np.sqrt(fl[..., 0] ** 2 + fl[..., 1] ** 2)
+        flow = _paflow(grays[i], grays[i + 1],
+                       levels=3, swatch=8, lam=0.05, n_iters=150, lr=0.05,
+                       sigma_start=6.0, sigma_end=0.5, device=device, verbose=False)
+        mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
         with np.errstate(divide='ignore', invalid='ignore'):
             d = np.where(mag >= 0.3,
                          focal_t * lateral_baseline / mag,
@@ -594,21 +597,24 @@ def wiggle_depth_map(frames: list, strafe_speed: float, frame_dt: float,
 
 def accumulate_flow_depth_map(frames: list, full_baseline_m: float,
                               focal_px: float, out_h: int, out_w: int,
-                              thumb_w: int = 320, thumb_h: int = 180,
-                              min_disp: float = 0.5):
-    """Depth from accumulated per-pair flow at full-burst baseline accuracy.
+                              thumb_w: int = 160, thumb_h: int = 90,
+                              min_disp: float = 0.5,
+                              device: "str | None" = None):
+    """Depth from accumulated per-pair pyramid affine flow at full-burst baseline.
 
-    Each consecutive frame pair has a small displacement (~0.1 m) so
-    Farneback tracks reliably.  Summing the per-pair flow vectors gives
-    the same total displacement as the first→last pair but without the
-    large-displacement tracking failures that occur when features move
-    more than ~30 px between frames.
+    Sums per-pair flow vectors to build the total displacement without
+    large-displacement tracking failures.  Pyramid affine fills in
+    textureless regions (walls, floors) via the smoothness regulariser.
 
     Returns (depth_map HxW float32 metres, mean_radial_px float, focal_t float).
-    mean_radial_px is the accumulated outward radial flow over the full burst,
-    consistent with the calibration walk which also used a full-burst baseline.
     """
     import cv2
+    import torch
+    from flow_affine import pyramid_affine_flow as _paflow
+
+    if device is None:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
     scale_x = thumb_w / frames[0].shape[1]
     focal_t = focal_px * scale_x
 
@@ -620,10 +626,9 @@ def accumulate_flow_depth_map(frames: list, full_baseline_m: float,
     accum_x = np.zeros((thumb_h, thumb_w), dtype=np.float32)
     accum_y = np.zeros((thumb_h, thumb_w), dtype=np.float32)
     for i in range(len(grays) - 1):
-        flow = cv2.calcOpticalFlowFarneback(
-            grays[i], grays[i + 1], None,
-            pyr_scale=0.5, levels=3, winsize=15,
-            iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
+        flow = _paflow(grays[i], grays[i + 1],
+                       levels=3, swatch=8, lam=0.05, n_iters=150, lr=0.05,
+                       sigma_start=6.0, sigma_end=0.5, device=device, verbose=False)
         accum_x += flow[..., 0]
         accum_y += flow[..., 1]
 
